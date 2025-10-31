@@ -4,7 +4,8 @@ from pathlib import Path
 import logging, os
 from jira import JIRA
 from jql_builder import build_JQL
-
+from issue_payload_builder import build_issue_payload
+from get_env import get_env_var
 
 
 load_dotenv()
@@ -22,46 +23,12 @@ logging.basicConfig(
 
 logging.debug("MCP Server starting up...")
 
-def get_env_var(from_mcp: bool = False):
-    """ Grabs the API token and the Jira site, reqeusts it if it does not exist. """
-    # Checks to see if an API token exists in the .env. If not, first checks for a .env and creates it, then requests the email address and API token to store. Skips if from MCP
-    env_path = Path('.') / '.env'
-    env_path.touch(exist_ok=True)
-
-    # Prefer explicit JIRA-specific variable names; fall back for backwards compatibility
-    jira_email = os.getenv("JIRA_EMAIL") or os.getenv("JIRA_USER_EMAIL") or os.getenv("USER")
-    api_token = os.getenv("API_TOKEN")
-    jira_site = os.getenv("JIRA_SITE")
-
-    if (not jira_email or not api_token) and from_mcp:
-        return ("API credentials not set. Please run a setup step to set JIRA_EMAIL and API_TOKEN in .env.")
-
-    if not api_token and not from_mcp:
-        user_input = input(f"Please provide the user's Jira email address: ")
-        token_input = input(f"""
-            Please provide the API Token for user {user_input}. Visit https://id.atlassian.com/manage-profile/security/api-tokens to create a token. 
-            Ensure the scoped token has Jira access and the following classic scopes:
-            read:jira-work 
-            write:jira-work
-
-        """)
-        set_key(env_path, "JIRA_EMAIL", user_input)
-        set_key(env_path, "API_TOKEN", token_input)
-        jira_email, api_token = user_input, token_input
-
-    if not jira_site and from_mcp:
-        return ("JIRA site missing. Please set JIRA_SITE in .env (e.g., https://yourorg.atlassian.net).")
-
-    if not jira_site and not from_mcp:
-        site_input = input("Please provide the Jira site (e.g., https://yourorg.atlassian.net): ")
-        set_key(env_path, "JIRA_SITE", site_input)
-        jira_site = site_input
-
-    return {
-        'user': jira_email,
-        'API_token': api_token,
-        'Jira_site': jira_site
-    }
+def make_jira():
+    env_vars = get_env_var(True)
+    if isinstance(env_vars, str):
+        return f"Fatal Error: {env_vars}"
+    
+    return JIRA(server=env_vars['Jira_site'], basic_auth=(env_vars['user'], env_vars['API_token']))
 
 def issue_search(instance, key, rf):
     """
@@ -133,6 +100,11 @@ def jql_search(instance, query, max_results: int = 50):
 
     return all_issues
 
+def create_issue(instance, rb):
+    payload = rb["fields"]
+    return instance.create_issue(payload)
+
+
 def get_custom_fields(instance):
     custom_fields = {}
     all_fields = instance.fields()
@@ -193,11 +165,8 @@ def jira_search( task_type: str, issue_key: str, criteria: dict, return_fields: 
     Return:
         dict or str: providing details about the ticket or tickets that have been requested if successful, string with error details if error occurs
     """
-    env_vars = get_env_var(True)
-    if isinstance(env_vars, str):
-        return f"Fatal Error: {env_vars}"
     
-    jira = JIRA(server=env_vars['Jira_site'], basic_auth=(env_vars['user'], env_vars['API_token']))
+    jira = make_jira()
 
     if task_type == "issue_search":
         issue = issue_search(jira, issue_key, return_fields)
@@ -206,6 +175,40 @@ def jira_search( task_type: str, issue_key: str, criteria: dict, return_fields: 
         JQL = build_JQL(criteria)
         issues = jql_search(jira, JQL)
         return issues
+    
+@mcp.tool():
+def jira_work_item_creator(data: dict):
+    """
+    Creates a issue/work item for Jira
+    Args:
+        data: dictionary describing the fields and values that need to be loaded into the new issue in Jira
+
+    JSON structure for data (strict):
+    - Use the field names as proviided by the user. Strip any spaces if included in the name
+    - for multiple items in a field, submit them as a list
+
+    Examples:
+        {
+            "issuetype": "Bug",
+            "Project": "Applications",
+            "Summary": "There is a missing image in the banner",
+            "Description": "A image is missing in the banner. When the page loads, a 403 error is seen for the missing image",
+            "Configuration": [
+                "Windows",
+                "Intel",
+                "Wireless"
+            ]
+        }
+
+    Return:
+        str: string response with the new issue key and url to access the issue.
+    """
+    jira = make_jira()
+    req_body = build_issue_payload(jira, data)
+    new_issue = create_issue(jira, req_body)
+    return "New Issue: " + str(new_issue) + f" | {os.getenv("JIRA_SITE")}/browse/" + str(new_issue)
+
+    
 
 @mcp.prompt()
 def jira_searcher():
@@ -222,9 +225,18 @@ def jira_searcher():
 
     """
 
+@mcp.prompt()
+def jira_issue_creator():
+    """ Global Instructions for creating a Jira Issue/Work Item"""
+    return f"""# Jira Issue Creator
+
+    You are a data entry specialist entering a Jira Issue into a Jira site. Take the details provided by 
+    the user to format the JSON payload for the MCP tool to convert into a issue payload and create an issue.
+
+    Return the name of the newly created issue and a link to the new issue.
+    """
+
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
 
-# Current To-Do: update the single issue search to pull custom field names
-# Future To-Do: create a write ticket and edit ticket tool.

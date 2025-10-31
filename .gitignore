@@ -10,3 +10,9 @@ jql_search.py
 
 # Virtual environments
 .venv
+
+# test files
+test/
+
+# Other files
+test.py
