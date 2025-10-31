@@ -176,7 +176,7 @@ def jira_search( task_type: str, issue_key: str, criteria: dict, return_fields: 
         issues = jql_search(jira, JQL)
         return issues
     
-@mcp.tool():
+@mcp.tool()
 def jira_work_item_creator(data: dict):
     """
     Creates a issue/work item for Jira
